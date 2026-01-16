@@ -1,4 +1,4 @@
 # [normal] [name] [value]
 # [server] [name] [username] [ip_address] [password] [port]
-[normal] [foo] [bar]
-[server] [foo] [bar] [baz] [bzz] [bozo]
+[normal] [foo-normal] [bar]
+[server] [foo-server] [bar] [122.122.1.1] [baz] [1203]

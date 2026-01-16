@@ -17,11 +17,7 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 fn writeClipboard(content: []const u8) !void {
-    switch (native_os) {
-        .linux, .macos => {},
-        else => return error.your_current_os_not_support_copy_to_clipboard,
-    }
-    const argv = if (native_os == .linux) [_][]const u8{ "xclip", "-selection", "clipboard"} else [_][]const u8 {"pbcopy"};
+    const argv = if (native_os == .linux) [_][]const u8{ "xclip", "-selection", "clipboard"} else [_][]const u8 {"pbcopy"}; // else macos
     var child = std.process.Child.init(&argv, allocator);
     child.stdin_behavior = .Pipe;
     try child.spawn();
@@ -59,29 +55,30 @@ const Flag = union(enum) {
     config: bool,
     config_value: [] const u8,
     timestamp: []const u8,
+    number: []const u8,
     math: []const []const u8,
     ssh: []const u8,
     scp: []const []const u8,
 
     fn init(args: *std.process.ArgIterator) !Flag {
         std.debug.assert(args.skip()); // ignore exe name
+        var has_any_args: bool = false;
         var copy_args = args.*;
         while (copy_args.next()) |arg| {
+            has_any_args = true;
             if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help"))
                 return .{ .help = true };
         }
+        if (!has_any_args) return .{ .help = true };
         while (args.*.next()) |arg| {
             if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "--config")) {
                 return .{ .config = true };
             } else if (std.mem.eql(u8, arg, "-cv") or std.mem.eql(u8, arg, "--config_value")) {
-                const value = args.next() orelse return error.config_value_not_provide_value;
-                return .{ .config_value = value };
+                return .{ .config_value = args.next() orelse return error.config_value_not_provide_value };
             } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--timestamp")) {
-                const value = args.next() orelse return error.timestamp_not_provide_value;
-                return .{ .timestamp = value };
+                return .{ .timestamp = args.next() orelse return error.timestamp_not_provide_value };
             } else if (std.mem.eql(u8, arg, "-ssh") or std.mem.eql(u8, arg, "--ssh")) {
-                const value = args.next() orelse return error.ssh_not_provide_value;
-                return .{ .ssh = value };
+                return .{ .ssh = args.next() orelse return error.ssh_not_provide_value };
             } else if (std.mem.eql(u8, arg, "-scp") or std.mem.eql(u8, arg, "--scp")) {
                 var array_list = std.ArrayList([]const u8).empty;
                 while (args.next()) |scp_arg| try array_list.append(allocator, scp_arg);
@@ -96,9 +93,11 @@ const Flag = union(enum) {
                 while (args.next()) |scp_arg| try array_list.append(allocator, scp_arg);
                 if (array_list.items.len == 0) return error.math_not_provide_value;
                 return .{ .math = array_list.items };
+            } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--number")) {
+                return .{ .number = args.next() orelse return error.number_not_provide_value };
             }
         }
-        return error.not_found_any_useful_flag;
+        return error.not_found_any_valid_flag;
     }
 };
 
@@ -206,8 +205,8 @@ fn run(flag: *const Flag, configs: []const Config) !void {
             }
             try stdout.flush();
         },
-        .config_value => |config_name| {
-            const config = Config.getOneByName(configs, config_name) orelse fatal("could not find config name: {s}", .{config_name});
+        .config_value => |arg| {
+            const config = Config.getOneByName(configs, arg) orelse fatal("could not find config name: {s}", .{arg});
             const value = switch (config.*) {
                 .normal => config.*.normal.value,
                 .server => config.*.server.password,
@@ -253,10 +252,10 @@ fn run(flag: *const Flag, configs: []const Config) !void {
             _ = try child.wait();
             try writeClipboard(result[0..result.len-1]);
         },
-        .ssh => |config_name| {
-            const config = Config.getOneByName(configs, config_name) orelse fatal("could not found ssh name: {s}", .{config_name});
+        .ssh => |arg| {
+            const config = Config.getOneByName(configs, arg) orelse fatal("could not found ssh name: {s}", .{arg});
             switch (config.*) {
-                .normal => fatal("could not found ssh config name: {s}", .{config_name}),
+                .normal => fatal("could not found ssh config name: {s}", .{arg}),
                 .server => {},
             }
             const server = config.*.server;
@@ -273,8 +272,8 @@ fn run(flag: *const Flag, configs: []const Config) !void {
             _ = try child.spawnAndWait();
             try printDurationSince(&start);
         },
-        .scp => |scp_args| {
-            const config_name = scp_args[scp_args.len - 1];
+        .scp => |args| {
+            const config_name = args[args.len-1];
             const config = Config.getOneByName(configs, config_name) orelse fatal("could not found scp name: {s}", .{config_name});
             switch (config.*) {
                 .normal => fatal("could not found scp config name: {s}", .{config_name}),
@@ -289,7 +288,7 @@ fn run(flag: *const Flag, configs: []const Config) !void {
             try array_list.append(allocator, server.port);
             try array_list.append(allocator, "-r");
             var i: usize = 0;
-            while (i < scp_args.len - 1) : (i += 1) try array_list.append(allocator, scp_args[i]);
+            while (i < args.len - 1) : (i += 1) try array_list.append(allocator, args[i]);
             try array_list.append(allocator, username_and_ip_with_home_dir);
             try writeClipboard(server.password);
             var child = std.process.Child.init(array_list.items, allocator);
@@ -297,9 +296,10 @@ fn run(flag: *const Flag, configs: []const Config) !void {
             _ = try child.spawnAndWait();
             try printDurationSince(&start);
         },
-        .math => |math_args| {
+        .math => |args| {
             var array_list = std.ArrayList(u8).empty;
-            for (math_args) |arg| try array_list.appendSlice(allocator, arg);
+            try array_list.appendSlice(allocator, "scale=6;");
+            for (args) |arg| try array_list.appendSlice(allocator, arg);
             try array_list.append(allocator, '\n');
             for (array_list.items) |*char| {
                 if (char.* == 'x' or char.* == 'X') char.* = '*';
@@ -318,6 +318,24 @@ fn run(flag: *const Flag, configs: []const Config) !void {
             try stdout.flush();
             _ = try child.wait();
             try writeClipboard(result[0..result.len-1]); // last char is \n
+        },
+        .number => |arg| {
+            const is_neg = arg[0] == '-';
+            const num: []const u8 = if (is_neg) arg[1..] else arg;
+            var decimal: i64 = undefined;
+            if (std.mem.startsWith(u8, num, "0x") or std.mem.startsWith(u8, num, "0X")) { // hex
+                decimal = try std.fmt.parseInt(i64, num[2..], 16);
+            } else if (std.mem.startsWith(u8, num, "0b") or std.mem.startsWith(u8, num, "0B")) { // binary
+                decimal = try std.fmt.parseInt(i64, num[2..], 2);
+            } else { // decimal
+                decimal = try std.fmt.parseInt(i64, num, 10);
+            }
+            const binary_len = std.fmt.count("{b}", .{decimal});
+            if (is_neg) decimal = -decimal;
+            try stdout.print("decimal: {d}\n", .{decimal});
+            try stdout.print("binary : {b} (length: {d})\n", .{decimal, binary_len});
+            try stdout.print("hex    : {x}\n", .{decimal});
+            try stdout.flush();
         }
     }
 }
@@ -325,6 +343,10 @@ fn run(flag: *const Flag, configs: []const Config) !void {
 
 pub fn main() !void {
     defer arena.deinit();
+    switch (native_os) {
+        .linux, .macos => {},
+        else => fatal("currently only surpport linux and macos"),
+    }
     var args = std.process.argsWithAllocator(allocator) catch |err| fatal("args iterator init fail: {}", .{err});
     const configs = Config.init();
     const flag = Flag.init(&args) catch |err| fatal("init flag fail: {}", .{err});
