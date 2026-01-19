@@ -11,9 +11,25 @@ const config_file_content = @embedFile("./config.txt");
 const text_yello_color = "\x1b[33m";
 const text_reset_color = "\x1b[0m";
 
+const ScpType = enum {
+    push, pull,
+    pub fn init(scp_args: []const []const u8) ScpType {
+        const colon_index = std.mem.findScalar(u8, scp_args[0], ':');
+        if (colon_index == null) return ScpType.push;
+        return ScpType.pull;
+    }
+};
+
 fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
     std.debug.print("ERROR: " ++ fmt ++ "\n", args);
     std.process.exit(1);
+}
+
+fn splitColon(str: []const u8) struct { config_name: ?[]const u8, path: ?[]const u8 } {
+    const i = std.mem.findScalar(u8, str, ':') orelse return .{ .config_name = null, .path = null };
+    if (i == 0) return .{ .config_name = null, .path = null };
+    if (i == str.len - 1) return .{ .config_name = str[0..i], .path = null };
+    return .{ .config_name = str[0..i], .path = str[i+1..] };
 }
 
 fn writeClipboard(content: []const u8) !void {
@@ -169,7 +185,6 @@ const Config = union(enum) {
     }
 };
 
-// TODO: fix the bug in scp, should print the content in the arraylist
 fn run(flag: *const Flag, configs: []const Config) !void {
     switch (flag.*) {
         .help => {
@@ -181,7 +196,7 @@ fn run(flag: *const Flag, configs: []const Config) !void {
             try stdout.print("    -n,   --number       decimal, binary(0b or 0B prefix), hex(0x or 0X prefix) transfer to one another\n", .{});
             try stdout.print("    -m,   --math         wrapper caulucator above bc, in zsh when use multiply('*') need to be quoted, so support replace 'x' for '*', 2x3 <==> 2*3 \n", .{});
             try stdout.print("    -ssh, --ssh          kit -ssh [config-name]\n", .{});
-            try stdout.print("    -scp, --scp          kit -scp <foo_dir> <bar_dir> [config-name]\n", .{});
+            try stdout.print("    -scp, --scp          kit -scp <foo_dir> <bar_dir> [config-name]\n", .{}); // TODO: update scp help message
             try stdout.flush();
         },
         .config => {
@@ -274,31 +289,52 @@ fn run(flag: *const Flag, configs: []const Config) !void {
             try printDurationSince(&start);
         },
         .scp => |args| {
-            var config_name = args[args.len-1];
-            var path: []const u8 = try allocator.dupe(u8, "~");
-            const delimiter = std.mem.findScalar(u8, config_name, ':');
-            if (delimiter) |index| {
-                if (index == 0) return error.scp_only_provide_colon;
-                path = try allocator.dupe(u8, config_name[index+1..]);
-                if (path.len == 0) return error.scp_not_provide_path_after_colon;
-                config_name = config_name[0..index];
+            var config_name: []const u8 = undefined;
+            const scp_type = ScpType.init(args);
+            switch (scp_type) {
+                .push => {
+                    config_name = args[args.len-1];
+                    if (std.mem.findScalar(u8, config_name, ':')) |_|
+                        config_name = splitColon(config_name).config_name orelse fatal("scp push arg: '{s}' not provide config name before colon", .{config_name});
+                },
+                .pull => config_name = splitColon(args[0]).config_name orelse fatal("scp pull: '{s}' not provide config name before colon\n", .{args[0]}),
             }
-            const config = Config.getOneByName(configs, config_name) orelse fatal("could not found scp name: {s}", .{config_name});
+            const config = Config.getOneByName(configs, config_name) orelse fatal("could not found scp config name: {s}", .{config_name});
             switch (config.*) {
                 .normal => fatal("could not found scp config name: {s}", .{config_name}),
                 .server => {},
             }
             const server = config.*.server;
-            const username_and_ip_with_home_dir = try allocator.alloc(u8, server.username.len + server.ip_addr.len + 2 + path.len); // 2 for "@:"
-            _ = try std.fmt.bufPrint(username_and_ip_with_home_dir, "{s}@{s}:{s}", .{server.username, server.ip_addr, path});
             var array_list = std.ArrayList([]const u8).empty;
             try array_list.append(allocator, "scp");
             try array_list.append(allocator, "-P");
             try array_list.append(allocator, server.port);
             try array_list.append(allocator, "-r");
             var i: usize = 0;
-            while (i < args.len - 1) : (i += 1) try array_list.append(allocator, args[i]);
-            try array_list.append(allocator, username_and_ip_with_home_dir);
+            switch (scp_type) {
+                .push => {
+                    while (i < args.len - 1) : (i += 1) try array_list.append(allocator, args[i]);
+                    const path = splitColon(args[args.len-1]).path orelse "~";
+                    const username_ip_path = try allocator.alloc(u8, server.username.len + server.ip_addr.len + 2 + path.len); // 2 for "@:"
+                    _ = try std.fmt.bufPrint(username_ip_path, "{s}@{s}:{s}", .{server.username, server.ip_addr, path});
+                    try array_list.append(allocator, username_ip_path);
+                },
+                .pull => {
+                    while (i < args.len - 1) : (i += 1) {
+                        const arg = args[i];
+                        _ = std.mem.findScalar(u8, arg, ':') orelse fatal("scp pull arg{d}: '{s}' not provide colon\n", .{i+1, arg});
+                        const result = splitColon(arg);
+                        const local_config_name = result.config_name orelse fatal("scp pull arg{d}: '{s}' not provide config name before colon", .{i+1, arg});
+                        const path = result.path orelse fatal("scp pull arg{d}: '{s}' not provide path after colon", .{i+1, arg});
+                        if (!std.mem.eql(u8, config_name, local_config_name))
+                            fatal("scp pull arg{d}: '{s}' config name[{s}] not match first one[{s}]", .{i+1, arg, local_config_name, config_name});
+                        const username_ip_path = try allocator.alloc(u8, server.username.len + server.ip_addr.len + 2 + path.len); // 2 for "@:"
+                        _ = try std.fmt.bufPrint(username_ip_path, "{s}@{s}:{s}", .{server.username, server.ip_addr, path});
+                        try array_list.append(allocator, username_ip_path);
+                    }
+                    try array_list.append(allocator, args[i]);
+                }
+            }
             try writeClipboard(server.password);
             var child = std.process.Child.init(array_list.items, allocator);
             const start = try std.time.Instant.now();
