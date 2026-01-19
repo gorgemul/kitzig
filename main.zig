@@ -169,6 +169,7 @@ const Config = union(enum) {
     }
 };
 
+// TODO: fix the bug in scp, should print the content in the arraylist
 fn run(flag: *const Flag, configs: []const Config) !void {
     switch (flag.*) {
         .help => {
@@ -273,15 +274,23 @@ fn run(flag: *const Flag, configs: []const Config) !void {
             try printDurationSince(&start);
         },
         .scp => |args| {
-            const config_name = args[args.len-1];
+            var config_name = args[args.len-1];
+            var path: []const u8 = try allocator.dupe(u8, "~");
+            const delimiter = std.mem.findScalar(u8, config_name, ':');
+            if (delimiter) |index| {
+                if (index == 0) return error.scp_only_provide_colon;
+                path = try allocator.dupe(u8, config_name[index+1..]);
+                if (path.len == 0) return error.scp_not_provide_path_after_colon;
+                config_name = config_name[0..index];
+            }
             const config = Config.getOneByName(configs, config_name) orelse fatal("could not found scp name: {s}", .{config_name});
             switch (config.*) {
                 .normal => fatal("could not found scp config name: {s}", .{config_name}),
                 .server => {},
             }
             const server = config.*.server;
-            const username_and_ip_with_home_dir = try allocator.alloc(u8, server.username.len + server.ip_addr.len + 3); // 3 for "@:~"
-            _ = try std.fmt.bufPrint(username_and_ip_with_home_dir, "{s}@{s}:~", .{server.username, server.ip_addr});
+            const username_and_ip_with_home_dir = try allocator.alloc(u8, server.username.len + server.ip_addr.len + 2 + path.len); // 2 for "@:"
+            _ = try std.fmt.bufPrint(username_and_ip_with_home_dir, "{s}@{s}:{s}", .{server.username, server.ip_addr, path});
             var array_list = std.ArrayList([]const u8).empty;
             try array_list.append(allocator, "scp");
             try array_list.append(allocator, "-P");
